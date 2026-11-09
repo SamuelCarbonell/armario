@@ -296,9 +296,17 @@ function suggestFor(date, occ, n = 1, exclude = new Set()) {
   return out;
 }
 const planDates = () => { const d = new Date(); return Array.from({ length: S.settings.days }, (_, k) => dkey(new Date(d.getFullYear(), d.getMonth(), d.getDate() + k))); };
+// Comprueba que un día planificado sigue siendo correcto (prendas existentes, estructura, usos y descanso)
 function validDay(k, p) {
+  const its = p.ids.map(byId);
+  if (!its.length || its.some(i => !i)) return false;
+  const c = x => its.filter(i => i.cat === x).length, subs = its.filter(i => i.cat === 'acc').map(i => i.sub);
+  if (!((c('top') === 1 && c('bottom') === 1 && !c('full')) || (c('full') === 1 && !c('top') && !c('bottom')))) return false;
+  if (c('shoes') > 1 || c('outer') > 1 || c('acc') > 4 || new Set(subs).size !== subs.length) return false;
+  if (p.occ === 'pijama' && (c('shoes') || c('outer') || c('acc'))) return false;
+  if (p.occ === 'deporte' && subs.some(s => s !== 'reloj' && s !== 'gorra')) return false;
   const n = dnum(k), u = usage(k);
-  return p.ids.length && p.ids.every(id => { const i = byId(id); return i && !resting(i, n, u); });
+  return its.every(i => !resting(i, n, u) && (!['top', 'bottom', 'full'].includes(i.cat) || i.uses.includes(p.occ)));
 }
 function regenDay(k, exclude) {
   const old = S.plan.get(k), occ = old?.occ || 'diario';
@@ -406,15 +414,18 @@ Responde solo JSON: [{"fecha":"AAAA-MM-DD","ids":["id"],"why":"motivo breve en e
 
 /* ---------- UI: utilidades ---------- */
 const dlg = $('#sheet');
-function sheet(html) { dlg.innerHTML = `<div class="sh">${html}</div>`; if (!dlg.open) dlg.showModal(); }
+const toastEl = () => $('#toast') || document.body.appendChild(Object.assign(document.createElement('div'), { id: 'toast', role: 'status' }));
+const parkToast = () => { const t = $('#toast'); if (t && dlg.contains(t)) document.body.append(t); };
+function sheet(html) { parkToast(); dlg.innerHTML = `<div class="sh">${html}</div>`; if (!dlg.open) dlg.showModal(); }
 function closeSheet() { dlg.close(); }
 dlg.addEventListener('click', e => { if (e.target === dlg && !S.busy) closeSheet(); });
 dlg.addEventListener('close', () => {
+  parkToast();
   if (S.share?.url) { URL.revokeObjectURL(S.share.url); S.share = null; }
   if (S.edit) { if (S.edit._new) { URL.revokeObjectURL(S.edit._u); S.queue.length = 0; } S.edit = null; }
 });
 function toast(m) {
-  const t = $('#toast');
+  const t = toastEl();
   (dlg.open ? dlg : document.body).append(t);
   t.textContent = m; t.classList.add('on');
   clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove('on'), 2600);
@@ -568,7 +579,9 @@ async function saveItem() {
   if (d.cat !== 'acc') delete d.sub; else d.sub ||= 'otro';
   const { _u, _new, _ai, ...it } = d;
   if (_new) { URL.revokeObjectURL(_u); S.items.unshift(it); } else S.items[S.items.findIndex(i => i.id === it.id)] = it;
-  reindex(); S.edit = null;
+  // con prendas nuevas, se rehacen los días que no has tocado (puestos, con 👍 o de la IA se mantienen)
+  if (_new) for (const [k, p] of S.plan) if (!p.worn && !p.liked && !p.ai) S.plan.delete(k);
+  reindex(); S.edit = null; ensurePlan();
   await idb.put('items', it);
   if (_new && S.queue.length) return nextQueue();
   closeSheet(); render(); toast('Guardado');
@@ -579,7 +592,7 @@ async function delItem() {
   S.items = S.items.filter(i => i.id !== id); reindex(); dropUrls(id);
   delete S.prefs.item[id]; for (const k in S.prefs.pair) if (k.includes(id)) delete S.prefs.pair[k];
   for (const [k, p] of S.plan) if (p.ids.includes(id) && !p.worn) S.plan.delete(k);
-  S.edit = null;
+  S.edit = null; ensurePlan();
   await Promise.all([idb.del('items', id), idb.put('kv', S.prefs, 'prefs')]);
   closeSheet(); render();
 }
@@ -625,7 +638,7 @@ async function importAll(file) {
     await Promise.all([idb.putMany('items', items), idb.putMany('log', d.log || []), idb.put('kv', profile, 'profile'), idb.put('kv', d.prefs || { item: {}, pair: {} }, 'prefs'),
       idb.put('kv', { ...S.settings, ...d.settings, key: S.settings.key }, 'settings'), idb.del('kv', 'plan')]);
     location.reload();
-  } catch (e) { console.error(e); toast('Ese archivo no es una copia válida'); }
+  } catch (e) { console.warn(e); toast('Ese archivo no es una copia válida'); }
 }
 
 /* ---------- Acciones (delegación de eventos) ---------- */
@@ -641,7 +654,7 @@ const A = {
     try { await aiPlan(); toast('Plan hecho con IA'); } catch (e) { toast('IA: ' + e.message); }
     render();
   },
-  like: b => { rate(planOf(b).ids, 1); toast('👍 Apuntado: más como este'); },
+  like: b => { const p = planOf(b); rate(p.ids, 1); p.liked = true; savePlan(); toast('👍 Apuntado: más como este'); },
   dislike: b => { const k = b.dataset.d; rate(planOf(b).ids, -1); regenDay(k, otherKeys(k)); savePlan(); render(); },
   reroll: b => { const k = b.dataset.d; regenDay(k, otherKeys(k)); savePlan(); render(); },
   async wear(b) { const ids = planOf(b).ids; await wear(ids); rate(ids, 0.5); render(); toast(`Apuntado. Esas prendas descansan ${S.settings.rest} días`); },
@@ -746,7 +759,13 @@ const A = {
   export: exportAll,
   import: () => $('#ifile').click(),
 };
-document.addEventListener('click', e => { const b = e.target.closest('[data-a]'); if (b && A[b.dataset.a]) { e.preventDefault(); A[b.dataset.a](b, e); } });
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-a]');
+  if (b && A[b.dataset.a]) { e.preventDefault(); Promise.resolve().then(() => A[b.dataset.a](b, e)).catch(fail); }
+});
+// red de seguridad: ningún fallo inesperado deja la app colgada
+function fail(err) { console.error(err); S.busy = false; toast('Algo ha fallado: ' + (err?.message || err)); if (!dlg.open) render(); }
+addEventListener('unhandledrejection', e => fail(e.reason));
 document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.id === 'city') A.citySearch(); });
 document.addEventListener('change', async e => {
   const t = e.target;
@@ -790,3 +809,6 @@ document.addEventListener('paste', e => {
   navigator.storage?.persist?.();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
 })();
+
+// Acceso interno solo para pruebas automáticas (?test en la URL)
+if (new URLSearchParams(location.search).has('test')) globalThis.__A = { S, A, aiPlan, ai, ensurePlan, suggestFor, calcSeason, usage, resting, restLeft, planDates, dnum, regenDay, render, label, palette };

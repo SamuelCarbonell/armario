@@ -1,5 +1,5 @@
 // Cambia la versión cada vez que subas cambios para que el iPhone descargue la nueva.
-const V = 'armario-v2';
+const V = 'armario-v3';
 const LIBS = 'armario-libs'; // librería y modelo de quitar fondos (se guardan para usarlos sin conexión)
 const SHELL = ['./', 'index.html', 'app.css', 'app.js', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
